@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: tooxs-buk-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BUK_STARTER_BASE_URL
+        sync: false
+      - key: BUK_STARTER_API_TOKEN
+        sync: false
+      - key: BUK_STARTER_AUTH_HEADER
+        value: Authorization
+      - key: BUK_STARTER_AUTH_SCHEME
+        value: Bearer
+      - key: BUK_STARTER_LEGACY_AUTH_HEADER
+        value: auth_token
+      - key: BUK_STARTER_SEND_LEGACY_AUTH_HEADER
+        value: "true"
+      - key: SERVER_API_KEY
+        sync: false
