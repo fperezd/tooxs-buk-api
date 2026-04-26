@@ -353,6 +353,18 @@ export class BukConversationalAgent {
     this.client = client;
   }
 
+  async findEmployeeByName(query) {
+    const normalizedQuery = normalizeForSearch(query);
+    const result = await this.client.get("/api/v1/employees", { search: query });
+    const employees = extractEmployees(result);
+    const matched = employees.filter((emp) => employeeMatchesQuery(emp, normalizedQuery));
+
+    if (!matched.length) return null;
+
+    const full = await this.client.get(`/api/v1/employees/${encodeURIComponent(matched[0].id)}`);
+    return full?.data ?? full;
+  }
+
   async handleInput(rawInput) {
     const input = rawInput.trim();
     const lower = normalize(input);
@@ -495,6 +507,71 @@ export class BukConversationalAgent {
       });
     }
 
+    if (lower.startsWith("afp de ")) {
+      const query = input.slice("afp de ".length).trim();
+      const employee = await this.findEmployeeByName(query);
+      if (!employee) return `No encontré empleados para: ${query}`;
+      const safe = applyProtectedEmployeePolicy(employee);
+      return formatResult({
+        empleado: getEmployeeDisplayName(safe),
+        afp: safe.pension_fund || "No disponible",
+        regimen_previsional: safe.pension_regime || "No disponible",
+        afc: safe.afc ?? null
+      });
+    }
+
+    if (lower.startsWith("salud de ")) {
+      const query = input.slice("salud de ".length).trim();
+      const employee = await this.findEmployeeByName(query);
+      if (!employee) return `No encontré empleados para: ${query}`;
+      const safe = applyProtectedEmployeePolicy(employee);
+      return formatResult({
+        empleado: getEmployeeDisplayName(safe),
+        isapre_fonasa: safe.health_company || "No disponible"
+      });
+    }
+
+    if (lower.startsWith("prevision de ")) {
+      const query = input.slice("prevision de ".length).trim();
+      const employee = await this.findEmployeeByName(query);
+      if (!employee) return `No encontré empleados para: ${query}`;
+      const safe = applyProtectedEmployeePolicy(employee);
+      return formatResult({
+        empleado: getEmployeeDisplayName(safe),
+        afp: safe.pension_fund || "No disponible",
+        regimen_previsional: safe.pension_regime || "No disponible",
+        afc: safe.afc ?? null,
+        isapre_fonasa: safe.health_company || "No disponible",
+        regimen_jubilacion: safe.retirement_regime || null
+      });
+    }
+
+    if (
+      lower.startsWith("historial sueldo de ") ||
+      lower.startsWith("variacion sueldo de ") ||
+      lower.startsWith("variación sueldo de ")
+    ) {
+      const prefixLen = lower.startsWith("historial sueldo de ")
+        ? "historial sueldo de ".length
+        : "variacion sueldo de ".length;
+      const query = input.slice(prefixLen).trim();
+      const employee = await this.findEmployeeByName(query);
+      if (!employee) return `No encontré empleados para: ${query}`;
+      const safe = applyProtectedEmployeePolicy(employee);
+      const jobs = (safe.jobs || []).map((job) => ({
+        start_date: job.start_date,
+        end_date: job.end_date || "vigente",
+        cargo: job.role?.name || null,
+        contrato: job.contract_type,
+        base_wage: job.base_wage
+      }));
+      return formatResult({
+        empleado: getEmployeeDisplayName(safe),
+        total_contratos: jobs.length,
+        historial: jobs
+      });
+    }
+
     if (lower.startsWith("get ")) {
       const rawPath = input.slice(4).trim();
       const { path, query } = extractPathAndQuery(rawPath);
@@ -545,6 +622,10 @@ export class BukConversationalAgent {
       "- empleado <id> en uf",
       "- buscar empleado <texto> en uf",
       "- uf  (valor UF del dia)",
+      "- afp de <nombre>",
+      "- salud de <nombre>",
+      "- prevision de <nombre>",
+      "- historial sueldo de <nombre>",
       "- get <ruta>[?query]",
       "- post <ruta> <json>",
       "",
