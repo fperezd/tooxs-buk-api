@@ -421,6 +421,50 @@ function summarizeAccountingPayload(payload) {
   };
 }
 
+function summarizeAccountingByEmployee(payload, rutToName = {}) {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const byRut = new Map();
+
+  rows.forEach((row) => {
+    const items = Array.isArray(row?.items) ? row.items : [];
+    items.forEach((item) => {
+      const rut = item?.employee_rut || item?.employee_document_number || "desconocido";
+      const amount = typeof item?.amount === "number" ? item.amount : Number(item?.amount);
+      if (!Number.isFinite(amount)) return;
+
+      if (!byRut.has(rut)) {
+        byRut.set(rut, { rut, haberes: 0, liquido: null });
+      }
+      const entry = byRut.get(rut);
+      if (item?.entry_type === "debit") {
+        entry.haberes += amount;
+      }
+      // "Líquido a Recibir" is the authoritative net pay item
+      if (/l[ií]quido a recibir/i.test(item?.description || "")) {
+        entry.liquido = amount;
+      }
+    });
+  });
+
+  return Array.from(byRut.values()).map((e) => ({
+    rut: e.rut,
+    nombre: rutToName[e.rut] || null,
+    total_haberes_clp: e.haberes,
+    liquido_clp: e.liquido ?? null
+  }));
+}
+
+function buildRutToNameMap(employees) {
+  const map = {};
+  for (const emp of employees) {
+    const rut = emp?.rut || emp?.document_number;
+    if (rut) {
+      map[rut] = emp?.full_name || `${emp?.first_name || ""} ${emp?.surname || ""}`.trim() || rut;
+    }
+  }
+  return map;
+}
+
 function buildHistoricalPayrollResponseFromRecords(periods, records, wantsUF, sourceLabel) {
   const byPeriod = new Map(records.map((record) => [record.period, record]));
   const missing = periods.filter((period) => !byPeriod.has(period));
@@ -440,7 +484,7 @@ function buildHistoricalPayrollResponseFromRecords(periods, records, wantsUF, so
       total_clp: item.total_clp,
       moneda: item.currency,
       cantidad_empleados: item.employees_count,
-      detalle_contable: item.accounting || null
+      ...(item.per_employee ? { empleados: item.per_employee } : { detalle_contable: item.accounting || null })
     })),
     fuente: sourceLabel,
     convertido_a_uf: wantsUF
@@ -595,12 +639,100 @@ export class BukConversationalAgent {
       return formatResult(safeResult);
     }
 
+    // liquido de <nombre> [en] <mes> <año> | <YYYY-MM>
+    const liquidoPrefixes = ["sueldo liquido de ", "monto liquido de ", "liquido de ",
+                             "sueldo líquido de ", "monto líquido de ", "líquido de "];
+    const liquidoPrefix = liquidoPrefixes.find((p) => lower.startsWith(p));
+    if (liquidoPrefix) {
+      const suffix = input.slice(liquidoPrefix.length).trim();
+      const periods = extractRequestedPeriods(suffix.toLowerCase());
+      if (!periods.length) {
+        return "Indica el período. Ejemplo: liquido de Juan Pérez marzo 2026";
+      }
+      const period = periods[0];
+      const parsedPeriod = splitPeriod(period);
+      if (!parsedPeriod) {
+        return `No pude interpretar el período: ${period}`;
+      }
+      // Remove period tokens from suffix to isolate name
+      const nameRaw = suffix
+        .replace(/\b\d{4}-(0[1-9]|1[0-2])\b/g, "")
+        .replace(
+          new RegExp(`\\b(${Object.keys(MONTH_TO_NUMBER).join("|")})\\b`, "gi"),
+          ""
+        )
+        .replace(/\b20\d{2}\b/g, "")
+        .replace(/\ben\b/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      if (!nameRaw) {
+        return "No pude identificar el nombre del empleado.";
+      }
+      const employee = await this.findEmployeeByName(nameRaw);
+      if (!employee) return `No encontré empleados para: ${nameRaw}`;
+      const safe = applyProtectedEmployeePolicy(employee);
+      const employeeRut = safe?.rut || safe?.document_number;
+
+      const payload = await this.client.get("/api/v1/accounting", {
+        month: parsedPeriod.month,
+        year: parsedPeriod.year,
+        process: "payroll"
+      });
+      const allRows = Array.isArray(payload?.data) ? payload.data : [];
+      const items = allRows.flatMap((row) => row.items || []);
+      const empItems = items.filter(
+        (it) => it?.employee_rut === employeeRut || it?.employee_document_number === employeeRut
+      );
+
+      if (!empItems.length) {
+        return `No encontré datos de remuneración para ${getEmployeeDisplayName(safe)} en el período ${period}.`;
+      }
+
+      let haberes = 0;
+      let liquido = null;
+      for (const it of empItems) {
+        const amt = typeof it.amount === "number" ? it.amount : Number(it.amount);
+        if (!Number.isFinite(amt)) continue;
+        if (it.entry_type === "debit") haberes += amt;
+        if (/l[ií]quido a recibir/i.test(it.description || "")) liquido = amt;
+      }
+
+      if (!wantsUF) {
+        return formatResult({
+          empleado: getEmployeeDisplayName(safe),
+          periodo: period,
+          total_haberes_clp: haberes,
+          liquido_clp: liquido,
+          fuente: "contabilidad BUK (endpoint real)"
+        });
+      }
+
+      const uf = await fetchUF();
+      return formatResult({
+        empleado: getEmployeeDisplayName(safe),
+        periodo: period,
+        total_haberes_clp: haberes,
+        total_haberes_uf: `UF ${formatUFAmount(clpToUF(haberes, uf.value))}`,
+        liquido_clp: liquido,
+        liquido_uf: liquido !== null ? `UF ${formatUFAmount(clpToUF(liquido, uf.value))}` : null,
+        valor_uf_usado: uf.value,
+        fecha_uf: uf.fechaDisplay,
+        fuente: "contabilidad BUK (endpoint real)"
+      });
+    }
+
     const payrollKeywords =
       lower.includes("costo total planilla") ||
       lower.includes("total planilla") ||
       lower.includes("total haberes");
 
     const hasPeriodHint = extractRequestedPeriods(lower).length > 0 || /\b20\d{2}\b/.test(lower);
+
+    const wantsPerEmployee =
+      lower.includes("por empleado") ||
+      lower.includes("desglose") ||
+      lower.includes("por persona") ||
+      lower.includes("cada empleado");
 
     const historicalPayrollIntent =
       (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación") ||
@@ -616,6 +748,15 @@ export class BukConversationalAgent {
       const realRecords = [];
       const failedPeriods = [];
 
+      // If per-employee breakdown requested, fetch employee names once
+      let rutToName = {};
+      if (wantsPerEmployee) {
+        try {
+          const empResult = await this.client.get("/api/v1/employees", { status: "activo" });
+          rutToName = buildRutToNameMap(extractEmployees(empResult));
+        } catch (_e) { /* name resolution best-effort */ }
+      }
+
       for (const period of periods) {
         const parsedPeriod = splitPeriod(period);
         if (!parsedPeriod) {
@@ -630,12 +771,16 @@ export class BukConversationalAgent {
             process: "payroll"
           });
           const accounting = summarizeAccountingPayload(payload);
+          const perEmployee = wantsPerEmployee
+            ? summarizeAccountingByEmployee(payload, rutToName)
+            : null;
           realRecords.push({
             period,
             total_clp: accounting.total_debit_clp,
             currency: "CLP",
             employees_count: accounting.employees_count,
-            accounting
+            accounting,
+            per_employee: perEmployee
           });
         } catch (_error) {
           failedPeriods.push(period);
@@ -821,8 +966,11 @@ export class BukConversationalAgent {
       "- salud de <nombre>",
       "- prevision de <nombre>",
       "- historial sueldo de <nombre>",
+      "- liquido de <nombre> <mes> <año>",
+      "- sueldo liquido de <nombre> <mes> <año>",
       "- costo planilla <YYYY-MM>",
       "- costo planilla enero y febrero 2026",
+      "- costo planilla por empleado marzo 2026",
       "- costo planilla marzo 2026 en uf",
       "- get <ruta>[?query]",
       "- post <ruta> <json>",
