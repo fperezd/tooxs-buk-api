@@ -496,7 +496,7 @@ function formatResult(result) {
     return result;
   }
 
-  return JSON.stringify(formatForLatinDisplay(result), null, 2);
+  return JSON.stringify(formatForLatinDisplay(result));
 }
 
 export class BukConversationalAgent {
@@ -622,21 +622,35 @@ export class BukConversationalAgent {
         : rawSuffix;
       const result = await this.client.get(`/api/v1/employees/${encodeURIComponent(id)}`);
       const safeResult = sanitizeEmployeePayload(result);
+      const employee = safeResult?.data ?? safeResult;
+      const safe = applyProtectedEmployeePolicy(employee);
+      const currentJob = safe?.current_job || {};
+
+      const compact = {
+        id: safe?.id,
+        nombre: getEmployeeDisplayName(safe),
+        rut: safe?.rut,
+        cargo: currentJob?.role?.name || null,
+        sueldo_base: currentJob?.base_wage ?? null,
+        estado: safe?.status,
+        email: safe?.email,
+        afp: safe?.pension_fund || null,
+        salud: safe?.health_company || null,
+        fecha_ingreso: safe?.active_since || null
+      };
 
       if (wantsUF) {
         const uf = await fetchUF();
-        const employee = safeResult?.data ?? safeResult;
-        const wage = getPayrollAmount(employee);
-        const wageUF = clpToUF(wage, uf.value);
+        const wage = getPayrollAmount(safe);
         return formatResult({
-          ...formatForLatinDisplay(safeResult),
-          sueldo_base_uf: `UF ${formatUFAmount(wageUF)}`,
+          ...compact,
+          sueldo_base_uf: `UF ${formatUFAmount(clpToUF(wage, uf.value))}`,
           valor_uf_usado: uf.value,
           fecha_uf: uf.fechaDisplay
         });
       }
 
-      return formatResult(safeResult);
+      return formatResult(compact);
     }
 
     // liquido de <nombre> [en] <mes> <año> | <YYYY-MM>
