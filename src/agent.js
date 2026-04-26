@@ -391,7 +391,9 @@ export class BukConversationalAgent {
 
     if (lower === "empleados") {
       const result = await this.client.get("/api/v1/employees");
-      return formatResult(sanitizeEmployeePayload(result));
+      const employees = extractEmployees(result);
+      const summaries = employees.map(buildEmployeeSummary);
+      return formatResult({ total: summaries.length, empleados: summaries });
     }
 
     if (lower.startsWith("buscar empleado ")) {
