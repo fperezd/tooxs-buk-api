@@ -1,3 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Node (obsoleto, eliminado)
 node_modules/
+
+# Env
 .env
+
+# Datos locales
 data/
+
