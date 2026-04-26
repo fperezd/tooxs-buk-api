@@ -87,4 +87,12 @@ app.get("/query", requireApiKey, async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor BUK API escuchando en puerto ${PORT} (modo: ${config.mode})`);
+
+  // Keep-alive: ping propio cada 10 minutos para evitar que Render lo duerma
+  const selfUrl = process.env.SELF_URL || `http://localhost:${PORT}`;
+  setInterval(() => {
+    fetch(`${selfUrl}/health`)
+      .then(() => console.log("[keep-alive] ping ok"))
+      .catch((e) => console.warn("[keep-alive] ping falló:", e.message));
+  }, 10 * 60 * 1000);
 });
