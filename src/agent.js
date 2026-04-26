@@ -1,4 +1,9 @@
 import { BukClient } from "./bukClient.js";
+import {
+  getPayrollRecordsByPeriods,
+  listPayrollPeriods,
+  normalizePeriod
+} from "./payrollStore.js";
 
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DATETIME_RE =
@@ -32,6 +37,21 @@ const CONTRACTUAL_FIELDS_TO_REDACT = [
   "reward_payment_period",
   "reward_description"
 ];
+const MONTH_TO_NUMBER = {
+  enero: "01",
+  febrero: "02",
+  marzo: "03",
+  abril: "04",
+  mayo: "05",
+  junio: "06",
+  julio: "07",
+  agosto: "08",
+  septiembre: "09",
+  setiembre: "09",
+  octubre: "10",
+  noviembre: "11",
+  diciembre: "12"
+};
 
 function formatLatinDate(rawValue) {
   if (DATE_ONLY_RE.test(rawValue)) {
@@ -335,6 +355,112 @@ function extractPathAndQuery(rawPath) {
   return { path, query };
 }
 
+function extractRequestedPeriods(lower) {
+  const directPeriods = lower.match(/\b\d{4}-(0[1-9]|1[0-2])\b/g) || [];
+  if (directPeriods.length) {
+    return [...new Set(directPeriods.map((period) => normalizePeriod(period)).filter(Boolean))];
+  }
+
+  const yearMatch = lower.match(/\b(20\d{2})\b/);
+  if (!yearMatch) {
+    return [];
+  }
+
+  const year = yearMatch[1];
+  const foundMonths = Object.entries(MONTH_TO_NUMBER)
+    .filter(([month]) => lower.includes(month))
+    .map(([, monthNumber]) => `${year}-${monthNumber}`);
+
+  return [...new Set(foundMonths)];
+}
+
+function splitPeriod(period) {
+  const normalized = normalizePeriod(period);
+  if (!normalized) {
+    return null;
+  }
+
+  const [yearText, monthText] = normalized.split("-");
+  return {
+    period: normalized,
+    year: Number(yearText),
+    month: Number(monthText)
+  };
+}
+
+function summarizeAccountingPayload(payload) {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+
+  let debit = 0;
+  let credit = 0;
+  let other = 0;
+  let lines = 0;
+
+  rows.forEach((row) => {
+    const items = Array.isArray(row?.items) ? row.items : [];
+    items.forEach((item) => {
+      const amount = typeof item?.amount === "number" ? item.amount : Number(item?.amount);
+      if (!Number.isFinite(amount)) {
+        return;
+      }
+
+      lines += 1;
+      if (item?.entry_type === "debit") {
+        debit += amount;
+      } else if (item?.entry_type === "credit") {
+        credit += amount;
+      } else {
+        other += amount;
+      }
+    });
+  });
+
+  return {
+    employees_count: rows.length,
+    line_items: lines,
+    total_debit_clp: debit,
+    total_credit_clp: credit,
+    total_other_clp: other,
+    total_entries_clp: debit + credit + other
+  };
+}
+
+function buildHistoricalPayrollResponseFromRecords(periods, records, wantsUF, sourceLabel) {
+  const byPeriod = new Map(records.map((record) => [record.period, record]));
+  const missing = periods.filter((period) => !byPeriod.has(period));
+  const found = periods
+    .filter((period) => byPeriod.has(period))
+    .map((period) => byPeriod.get(period));
+
+  const total = found.reduce((sum, item) => sum + item.total_clp, 0);
+
+  return {
+    total_periodos_solicitados: periods.length,
+    periodos_encontrados: found.length,
+    periodos_faltantes: missing,
+    total_planilla_clp: total,
+    detalle: found.map((item) => ({
+      periodo: item.period,
+      total_clp: item.total_clp,
+      moneda: item.currency,
+      cantidad_empleados: item.employees_count,
+      detalle_contable: item.accounting || null
+    })),
+    fuente: sourceLabel,
+    convertido_a_uf: wantsUF
+  };
+}
+
+function buildHistoricalPayrollResponse(periods, wantsUF) {
+  const records = getPayrollRecordsByPeriods(periods);
+  return buildHistoricalPayrollResponseFromRecords(
+    periods,
+    records,
+    wantsUF,
+    "datos guardados via webhook/carga manual"
+  );
+}
+
 function formatResult(result) {
   if (typeof result === "string") {
     return result;
@@ -438,13 +564,13 @@ export class BukConversationalAgent {
       if (wantsUF) {
         const uf = await fetchUF();
         const summariesUF = summaries.map((emp) => {
-          const rawWage = typeof emp.base_wage === "number" ? emp.base_wage : null;
+          const rawWage = typeof emp.sueldo_base === "number" ? emp.sueldo_base : null;
           return {
             ...emp,
-            base_wage_uf:
-              rawWage !== null && emp.base_wage !== REDACTED_TEXT
+            sueldo_base_uf:
+              rawWage !== null && emp.sueldo_base !== REDACTED_TEXT
                 ? `UF ${formatUFAmount(clpToUF(rawWage, uf.value))}`
-                : emp.base_wage
+                : emp.sueldo_base
           };
         });
         return formatResult({
@@ -487,6 +613,81 @@ export class BukConversationalAgent {
       lower.includes("costo total planilla") ||
       lower.includes("total planilla") ||
       lower.includes("total haberes");
+
+    const historicalPayrollIntent =
+      (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación")) &&
+      (extractRequestedPeriods(lower).length > 0 || /\b20\d{2}\b/.test(lower));
+
+    if (lower === "periodos planilla" || lower === "periodos de planilla") {
+      const periods = listPayrollPeriods();
+      return formatResult({ total: periods.length, periodos: periods });
+    }
+
+    if (historicalPayrollIntent) {
+      const periods = extractRequestedPeriods(lower);
+      if (!periods.length) {
+        return "No pude identificar periodos. Usa formato YYYY-MM o meses con año, por ejemplo: costo planilla enero y febrero 2026.";
+      }
+
+      const realRecords = [];
+      const failedPeriods = [];
+
+      for (const period of periods) {
+        const parsedPeriod = splitPeriod(period);
+        if (!parsedPeriod) {
+          failedPeriods.push(period);
+          continue;
+        }
+
+        try {
+          const payload = await this.client.get("/api/v1/accounting", {
+            month: parsedPeriod.month,
+            year: parsedPeriod.year,
+            process: "payroll"
+          });
+          const accounting = summarizeAccountingPayload(payload);
+          realRecords.push({
+            period,
+            total_clp: accounting.total_debit_clp,
+            currency: "CLP",
+            employees_count: accounting.employees_count,
+            accounting
+          });
+        } catch (_error) {
+          failedPeriods.push(period);
+        }
+      }
+
+      const fallbackRecords = failedPeriods.length
+        ? getPayrollRecordsByPeriods(failedPeriods)
+        : [];
+      const mergedRecords = [...realRecords, ...fallbackRecords];
+      const baseResponse = buildHistoricalPayrollResponseFromRecords(
+        periods,
+        mergedRecords,
+        wantsUF,
+        failedPeriods.length ? "contabilidad BUK + fallback manual" : "contabilidad BUK (endpoint real)"
+      );
+
+      if (!wantsUF) {
+        return formatResult(baseResponse);
+      }
+
+      const uf = await fetchUF();
+      const detalleUF = baseResponse.detalle.map((item) => ({
+        ...item,
+        total_uf: `UF ${formatUFAmount(clpToUF(item.total_clp, uf.value))}`
+      }));
+
+      return formatResult({
+        ...baseResponse,
+        detalle: detalleUF,
+        total_planilla_uf: `UF ${formatUFAmount(clpToUF(baseResponse.total_planilla_clp, uf.value))}`,
+        valor_uf_usado: uf.value,
+        fecha_uf: uf.fechaDisplay,
+        convertido_a_uf: true
+      });
+    }
 
     if (payrollKeywords) {
       const result = await this.client.get("/api/v1/employees");
@@ -635,6 +836,10 @@ export class BukConversationalAgent {
       "- salud de <nombre>",
       "- prevision de <nombre>",
       "- historial sueldo de <nombre>",
+      "- periodos planilla",
+      "- costo planilla <YYYY-MM>",
+      "- costo planilla enero y febrero 2026",
+      "- costo planilla marzo 2026 en uf",
       "- get <ruta>[?query]",
       "- post <ruta> <json>",
       "",

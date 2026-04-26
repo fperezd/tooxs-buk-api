@@ -1,15 +1,20 @@
 openapi: 3.1.0
 info:
   title: Tooxs BUK API
-  description: Consulta información de empleados y planilla de Tooxs desde BUK en lenguaje natural
   version: 1.0.0
 servers:
   - url: https://tooxs-buk-api.onrender.com
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
 paths:
   /health:
     get:
       operationId: healthCheck
-      summary: Verifica que la API esté activa
+      summary: Verifica que la API este activa
       responses:
         "200":
           description: Estado del servicio
@@ -20,25 +25,12 @@ paths:
                 properties:
                   status:
                     type: string
-                    example: Ok!
                   mode:
                     type: string
-                    example: starter
   /chat:
     post:
       operationId: consultarBUK
-      summary: Envía un comando en lenguaje natural al agente BUK de Tooxs
-      description: |
-        Comandos disponibles (en español):
-        - `empleados` — lista todos los empleados activos
-        - `buscar empleado <nombre>` — busca empleados por nombre o apellido
-        - `buscar empleado <nombre> en uf` — idem con sueldos en UF
-        - `empleado <id>` — detalle de un empleado por ID
-        - `empleado <id> en uf` — idem con sueldo en UF
-        - `costo total planilla` — suma total de sueldos base
-        - `costo total planilla en uf` — idem en UF con valor UF del día
-        - `uf` / `valor uf` / `uf hoy` — valor oficial UF del día (Banco Central)
-        - `ping` — verifica conectividad con BUK
+      summary: Consulta empleados y planilla de Tooxs en lenguaje natural
       requestBody:
         required: true
         content:
@@ -50,11 +42,9 @@ paths:
               properties:
                 message:
                   type: string
-                  description: Comando en español dirigido al agente BUK
-                  example: costo total planilla en uf
       responses:
         "200":
-          description: Respuesta del agente en texto o JSON formateado
+          description: Respuesta del agente
           content:
             application/json:
               schema:
@@ -62,8 +52,100 @@ paths:
                 properties:
                   response:
                     type: string
-                    description: Resultado del comando, puede ser texto plano o JSON serializado
-        "401":
-          description: API Key inválida o ausente
-        "400":
-          description: Body inválido o campo message faltante
+      security:
+        - ApiKeyAuth: []
+  /payroll/upload-json:
+    post:
+      operationId: uploadPayrollJson
+      summary: Carga manual de planilla real por periodo (JSON)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required:
+                    - period
+                    - total_clp
+                  properties:
+                    period:
+                      type: string
+                      example: 2026-03
+                    total_clp:
+                      type: number
+                    currency:
+                      type: string
+                      example: CLP
+                    employees_count:
+                      type: integer
+                - type: array
+                  items:
+                    type: object
+      responses:
+        "201":
+          description: Registros guardados
+      security:
+        - ApiKeyAuth: []
+  /payroll/upload-csv:
+    post:
+      operationId: uploadPayrollCsv
+      summary: Carga manual de planilla real por periodo (CSV)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: Registros guardados
+      security:
+        - ApiKeyAuth: []
+  /payroll/periods:
+    get:
+      operationId: getPayrollPeriods
+      summary: Lista periodos de planilla almacenados
+      responses:
+        "200":
+          description: Lista de periodos
+      security:
+        - ApiKeyAuth: []
+  /payroll/{period}:
+    get:
+      operationId: getPayrollByPeriod
+      summary: Obtiene planilla real de un periodo
+      parameters:
+        - in: path
+          name: period
+          required: true
+          schema:
+            type: string
+            example: 2026-03
+      responses:
+        "200":
+          description: Planilla del periodo
+        "404":
+          description: No existe planilla para ese periodo
+      security:
+        - ApiKeyAuth: []
+  /webhooks/buk/payroll:
+    post:
+      operationId: receiveBukPayrollWebhook
+      summary: Recibe eventos de cierre de planilla desde BUK
+      description: Requiere header X-Webhook-Secret con el valor de BUK_WEBHOOK_SECRET
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "202":
+          description: Evento recibido
