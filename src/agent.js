@@ -465,6 +465,48 @@ function buildRutToNameMap(employees) {
   return map;
 }
 
+function extractYearFromText(lower) {
+  const match = lower.match(/\b(20\d{2})\b/);
+  return match ? Number(match[1]) : new Date().getFullYear();
+}
+
+function buildEvolucionDetalle(records, alertThreshold = 5) {
+  const sorted = [...records].sort((a, b) => a.period.localeCompare(b.period));
+  return sorted.map((item, idx) => {
+    const prev = idx > 0 ? sorted[idx - 1] : null;
+    const variacion_pct =
+      prev && prev.total_clp > 0
+        ? Math.round(((item.total_clp - prev.total_clp) / prev.total_clp) * 1000) / 10
+        : null;
+    const entry = {
+      periodo: item.period,
+      total_clp: item.total_clp,
+      headcount: item.employees_count,
+      variacion_pct
+    };
+    if (variacion_pct !== null && Math.abs(variacion_pct) >= alertThreshold) {
+      entry.alerta = `${variacion_pct > 0 ? "+" : ""}${variacion_pct}% vs mes anterior`;
+    }
+    return entry;
+  });
+}
+
+function buildProyeccionAnual(records) {
+  const sorted = [...records].sort((a, b) => a.period.localeCompare(b.period));
+  if (!sorted.length) return null;
+  const totalCLP = sorted.reduce((sum, r) => sum + r.total_clp, 0);
+  const promedio = totalCLP / sorted.length;
+  return {
+    meses_base: sorted.length,
+    periodo_desde: sorted[0].period,
+    periodo_hasta: sorted[sorted.length - 1].period,
+    total_real_clp: Math.round(totalCLP),
+    promedio_mensual_clp: Math.round(promedio),
+    proyeccion_anual_clp: Math.round(promedio * 12),
+    nota: `Basado en ${sorted.length} mes${sorted.length === 1 ? "" : "es"} reales`
+  };
+}
+
 function buildHistoricalPayrollResponseFromRecords(periods, records, wantsUF, sourceLabel) {
   const byPeriod = new Map(records.map((record) => [record.period, record]));
   const missing = periods.filter((period) => !byPeriod.has(period));
@@ -502,6 +544,26 @@ function formatResult(result) {
 export class BukConversationalAgent {
   constructor(client = new BukClient()) {
     this.client = client;
+  }
+
+  async fetchPeriodsForYear(year) {
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
+    const maxMonth = year === currentYear ? currentMonth : 12;
+    const results = [];
+    for (let month = 1; month <= maxMonth; month++) {
+      const period = `${year}-${String(month).padStart(2, "0")}`;
+      try {
+        const payload = await this.client.get("/api/v1/accounting", {
+          month, year, process: "payroll"
+        });
+        const summary = summarizeAccountingPayload(payload);
+        if (summary.employees_count > 0) {
+          results.push({ period, total_clp: summary.total_debit_clp, employees_count: summary.employees_count, payload });
+        }
+      } catch (_e) { /* period not available */ }
+    }
+    return results;
   }
 
   async findEmployeeByName(query) {
@@ -748,10 +810,111 @@ export class BukConversationalAgent {
       lower.includes("por persona") ||
       lower.includes("cada empleado");
 
+    const evolucionIntent =
+      (lower.includes("evolucion") || lower.includes("evolución") ||
+       lower.includes("tendencia planilla") || lower.includes("evolucion mensual") ||
+       lower.includes("evolución mensual"));
+
+    const proyeccionIntent =
+      lower.includes("proyeccion") || lower.includes("proyección") || lower.includes("proyectar");
+
+    const headcountIntent =
+      lower.includes("headcount") ||
+      (lower.includes("headcount historico") || lower.includes("headcount histórico"));
+
+    const ratioIntent =
+      lower.includes("ratio") ||
+      lower.includes("carga previsional") ||
+      lower.includes("eficiencia planilla");
+
     const historicalPayrollIntent =
+      !evolucionIntent && !proyeccionIntent && !headcountIntent && !ratioIntent &&
       (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación") ||
        lower.includes("remuneracion") || lower.includes("remuneración") || lower.includes("haberes")) &&
       hasPeriodHint;
+
+    // ---- ANALYTICS: Evolución mensual de planilla ----
+    if (evolucionIntent) {
+      const year = extractYearFromText(lower);
+      const records = await this.fetchPeriodsForYear(year);
+      if (!records.length) {
+        return `No encontré datos de planilla para ${year} en BUK.`;
+      }
+      const evolucion = buildEvolucionDetalle(records);
+      const alertas = evolucion.filter((e) => e.alerta).map((e) => `${e.periodo}: ${e.alerta}`);
+      const response = {
+        año: year,
+        meses_encontrados: records.length,
+        evolucion,
+        alertas_variacion: alertas.length ? alertas : "ninguna"
+      };
+      if (wantsUF) {
+        const uf = await fetchUF();
+        response.evolucion_uf = evolucion.map((e) => ({
+          periodo: e.periodo,
+          total_uf: `UF ${formatUFAmount(clpToUF(e.total_clp, uf.value))}`
+        }));
+        response.valor_uf_usado = uf.value;
+      }
+      return formatResult(response);
+    }
+
+    // ---- ANALYTICS: Proyección anual ----
+    if (proyeccionIntent) {
+      const year = extractYearFromText(lower);
+      const records = await this.fetchPeriodsForYear(year);
+      if (!records.length) {
+        return `No encontré datos de planilla para ${year} en BUK.`;
+      }
+      const proyeccion = buildProyeccionAnual(records);
+      if (wantsUF) {
+        const uf = await fetchUF();
+        proyeccion.proyeccion_anual_uf = `UF ${formatUFAmount(clpToUF(proyeccion.proyeccion_anual_clp, uf.value))}`;
+        proyeccion.promedio_mensual_uf = `UF ${formatUFAmount(clpToUF(proyeccion.promedio_mensual_clp, uf.value))}`;
+        proyeccion.valor_uf_usado = uf.value;
+        proyeccion.fecha_uf = (await fetchUF()).fechaDisplay;
+      }
+      return formatResult(proyeccion);
+    }
+
+    // ---- ANALYTICS: Headcount histórico ----
+    if (headcountIntent) {
+      const year = extractYearFromText(lower);
+      const records = await this.fetchPeriodsForYear(year);
+      if (!records.length) {
+        return `No encontré datos de headcount para ${year} en BUK.`;
+      }
+      return formatResult({
+        año: year,
+        headcount: records.map((r) => ({ periodo: r.period, cantidad_empleados: r.employees_count }))
+      });
+    }
+
+    // ---- ANALYTICS: Ratio carga previsional ----
+    if (ratioIntent) {
+      const year = extractYearFromText(lower);
+      const records = await this.fetchPeriodsForYear(year);
+      if (!records.length) {
+        return `No encontré datos para ${year} en BUK.`;
+      }
+      const ratios = records.map((r) => {
+        const byEmp = summarizeAccountingByEmployee(r.payload, {});
+        const totalHaberes = byEmp.reduce((s, e) => s + (e.total_haberes_clp || 0), 0);
+        const totalLiquido = byEmp.reduce((s, e) => s + (e.liquido_clp || 0), 0);
+        const ratio =
+          totalHaberes > 0 && totalLiquido > 0
+            ? Math.round((totalLiquido / totalHaberes) * 1000) / 10
+            : null;
+        return {
+          periodo: r.period,
+          total_haberes_brutos_clp: totalHaberes,
+          total_liquido_clp: totalLiquido,
+          ratio_liquido_pct: ratio !== null ? `${ratio}%` : null,
+          carga_adicional_pct: ratio !== null ? `${Math.round((100 - ratio) * 10) / 10}%` : null
+        };
+      });
+      return formatResult({ año: year, ratio_carga_previsional: ratios });
+    }
 
     if (historicalPayrollIntent) {
       const periods = extractRequestedPeriods(lower);
@@ -986,6 +1149,12 @@ export class BukConversationalAgent {
       "- costo planilla enero y febrero 2026",
       "- costo planilla por empleado marzo 2026",
       "- costo planilla marzo 2026 en uf",
+      "- evolucion planilla 2026",
+      "- proyeccion planilla 2026",
+      "- proyeccion planilla 2026 en uf",
+      "- headcount 2026",
+      "- ratio planilla 2026",
+      "- carga previsional 2026",
       "- get <ruta>[?query]",
       "- post <ruta> <json>",
       "",
