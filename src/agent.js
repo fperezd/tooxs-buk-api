@@ -1,9 +1,4 @@
 import { BukClient } from "./bukClient.js";
-import {
-  getPayrollRecordsByPeriods,
-  listPayrollPeriods,
-  normalizePeriod
-} from "./payrollStore.js";
 
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DATETIME_RE =
@@ -52,6 +47,7 @@ const MONTH_TO_NUMBER = {
   noviembre: "11",
   diciembre: "12"
 };
+const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 function formatLatinDate(rawValue) {
   if (DATE_ONLY_RE.test(rawValue)) {
@@ -358,7 +354,7 @@ function extractPathAndQuery(rawPath) {
 function extractRequestedPeriods(lower) {
   const directPeriods = lower.match(/\b\d{4}-(0[1-9]|1[0-2])\b/g) || [];
   if (directPeriods.length) {
-    return [...new Set(directPeriods.map((period) => normalizePeriod(period)).filter(Boolean))];
+    return [...new Set(directPeriods.filter((period) => PERIOD_RE.test(period)))];
   }
 
   const yearMatch = lower.match(/\b(20\d{2})\b/);
@@ -375,7 +371,7 @@ function extractRequestedPeriods(lower) {
 }
 
 function splitPeriod(period) {
-  const normalized = normalizePeriod(period);
+  const normalized = PERIOD_RE.test(period) ? period : null;
   if (!normalized) {
     return null;
   }
@@ -449,16 +445,6 @@ function buildHistoricalPayrollResponseFromRecords(periods, records, wantsUF, so
     fuente: sourceLabel,
     convertido_a_uf: wantsUF
   };
-}
-
-function buildHistoricalPayrollResponse(periods, wantsUF) {
-  const records = getPayrollRecordsByPeriods(periods);
-  return buildHistoricalPayrollResponseFromRecords(
-    periods,
-    records,
-    wantsUF,
-    "datos guardados via webhook/carga manual"
-  );
 }
 
 function formatResult(result) {
@@ -618,11 +604,6 @@ export class BukConversationalAgent {
       (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación")) &&
       (extractRequestedPeriods(lower).length > 0 || /\b20\d{2}\b/.test(lower));
 
-    if (lower === "periodos planilla" || lower === "periodos de planilla") {
-      const periods = listPayrollPeriods();
-      return formatResult({ total: periods.length, periodos: periods });
-    }
-
     if (historicalPayrollIntent) {
       const periods = extractRequestedPeriods(lower);
       if (!periods.length) {
@@ -658,16 +639,17 @@ export class BukConversationalAgent {
         }
       }
 
-      const fallbackRecords = failedPeriods.length
-        ? getPayrollRecordsByPeriods(failedPeriods)
-        : [];
-      const mergedRecords = [...realRecords, ...fallbackRecords];
       const baseResponse = buildHistoricalPayrollResponseFromRecords(
         periods,
-        mergedRecords,
+        realRecords,
         wantsUF,
-        failedPeriods.length ? "contabilidad BUK + fallback manual" : "contabilidad BUK (endpoint real)"
+        "contabilidad BUK (endpoint real)"
       );
+
+      if (failedPeriods.length) {
+        baseResponse.advertencia =
+          "Algunos periodos no estan disponibles en contabilidad BUK para este tenant.";
+      }
 
       if (!wantsUF) {
         return formatResult(baseResponse);
@@ -836,7 +818,6 @@ export class BukConversationalAgent {
       "- salud de <nombre>",
       "- prevision de <nombre>",
       "- historial sueldo de <nombre>",
-      "- periodos planilla",
       "- costo planilla <YYYY-MM>",
       "- costo planilla enero y febrero 2026",
       "- costo planilla marzo 2026 en uf",

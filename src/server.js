@@ -1,18 +1,9 @@
 import express from "express";
-import multer from "multer";
-import { parse as parseCsv } from "csv-parse/sync";
 import { BukConversationalAgent } from "./agent.js";
 import { config } from "./config.js";
-import {
-  getPayrollByPeriod,
-  listPayrollPeriods,
-  upsertPayrollRecord,
-  upsertPayrollRecords
-} from "./payrollStore.js";
 
 const app = express();
 app.use(express.json());
-const upload = multer({ storage: multer.memoryStorage() });
 
 const agent = new BukConversationalAgent();
 
@@ -37,99 +28,9 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-function requireWebhookSecret(req, res, next) {
-  const secret = process.env.BUK_WEBHOOK_SECRET;
-  if (!secret) {
-    res.status(503).json({ error: "BUK_WEBHOOK_SECRET no configurado." });
-    return;
-  }
-
-  const provided = req.headers["x-webhook-secret"];
-  if (provided !== secret) {
-    res.status(401).json({ error: "Webhook no autorizado." });
-    return;
-  }
-
-  next();
-}
-
-function parsePayrollCsv(buffer) {
-  const text = buffer.toString("utf8");
-  const records = parseCsv(text, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true
-  });
-
-  return records.map((row) => ({
-    period: row.period || row.periodo || row.mes,
-    total_clp: row.total_clp || row.total || row.total_haberes || row.monto,
-    currency: row.currency || row.moneda || "CLP",
-    employees_count: row.employees_count || row.cantidad_empleados || row.employee_count
-  }));
-}
-
 // ── Health check (público, sin auth) ────────────────────────────────────────
 app.get("/health", (_req, res) => {
   res.json({ status: "Ok!", mode: config.mode });
-});
-
-// ── Planilla real: carga manual e integración webhook ───────────────────────
-app.post("/payroll/upload-json", requireApiKey, (req, res) => {
-  try {
-    const payload = req.body;
-
-    if (Array.isArray(payload)) {
-      const saved = upsertPayrollRecords(payload, "manual_json");
-      res.status(201).json({ saved: saved.length, periods: saved.map((item) => item.period) });
-      return;
-    }
-
-    const saved = upsertPayrollRecord(payload, "manual_json");
-    res.status(201).json({ saved: 1, period: saved.period });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.post("/payroll/upload-csv", requireApiKey, upload.single("file"), (req, res) => {
-  try {
-    if (!req.file?.buffer) {
-      res.status(400).json({ error: "Debes enviar un archivo CSV en el campo 'file'." });
-      return;
-    }
-
-    const records = parsePayrollCsv(req.file.buffer);
-    const saved = upsertPayrollRecords(records, "manual_csv");
-    res.status(201).json({ saved: saved.length, periods: saved.map((item) => item.period) });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.post("/webhooks/buk/payroll", requireWebhookSecret, (req, res) => {
-  try {
-    const payload = req.body?.data || req.body;
-    const saved = upsertPayrollRecord(payload, "buk_webhook");
-    res.status(202).json({ ok: true, period: saved.period });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.get("/payroll/periods", requireApiKey, (_req, res) => {
-  const periods = listPayrollPeriods();
-  res.json({ total: periods.length, periods });
-});
-
-app.get("/payroll/:period", requireApiKey, (req, res) => {
-  const record = getPayrollByPeriod(req.params.period);
-  if (!record) {
-    res.status(404).json({ error: "No existe planilla para ese periodo." });
-    return;
-  }
-
-  res.json(record);
 });
 
 // ── Endpoint principal: POST /chat ───────────────────────────────────────────
