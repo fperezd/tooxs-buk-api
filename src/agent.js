@@ -260,15 +260,10 @@ function buildEmployeeSummary(employee) {
 
   return {
     id: safeEmployee?.id ?? null,
-    full_name: getEmployeeDisplayName(safeEmployee),
-    rut: safeEmployee?.rut || safeEmployee?.document_number || null,
-    email: safeEmployee?.email || null,
-    status: safeEmployee?.status || null,
-    role: currentJob?.role?.name || null,
-    contract_type: currentJob?.contract_type || null,
-    start_date: currentJob?.start_date || null,
-    base_wage: currentJob?.base_wage ?? null,
-    privacy_policy_applied: isProtectedEmployee(safeEmployee)
+    nombre: getEmployeeDisplayName(safeEmployee),
+    cargo: currentJob?.role?.name || null,
+    sueldo_base: currentJob?.base_wage ?? null,
+    estado: safeEmployee?.status || null
   };
 }
 
@@ -401,7 +396,21 @@ export class BukConversationalAgent {
       return `UF del ${uf.fechaDisplay}: ${formatCLP(uf.value)}`;
     }
 
-    if (lower === "empleados") {
+    if (lower === "empleados" || lower === "empleados activos") {
+      const result = await this.client.get("/api/v1/employees", { status: "activo" });
+      const employees = extractEmployees(result);
+      const summaries = employees.map(buildEmployeeSummary);
+      return formatResult({ total: summaries.length, estado: "activo", empleados: summaries });
+    }
+
+    if (lower === "empleados inactivos") {
+      const result = await this.client.get("/api/v1/employees", { status: "inactivo" });
+      const employees = extractEmployees(result);
+      const summaries = employees.map(buildEmployeeSummary);
+      return formatResult({ total: summaries.length, estado: "inactivo", empleados: summaries });
+    }
+
+    if (lower === "empleados todos" || lower === "todos los empleados") {
       const result = await this.client.get("/api/v1/employees");
       const employees = extractEmployees(result);
       const summaries = employees.map(buildEmployeeSummary);
