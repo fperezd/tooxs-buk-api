@@ -10,6 +10,15 @@ components:
       type: apiKey
       in: header
       name: X-Api-Key
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Descripción del error
+      required:
+        - error
 paths:
   /health:
     get:
@@ -52,5 +61,64 @@ paths:
                 properties:
                   response:
                     type: string
+        "400":
+          description: Petición inválida (campo message faltante o vacío)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No autorizado — API key inválida o ausente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Error interno del servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
+  /query:
+    get:
+      operationId: consultarBUKGet
+      summary: Consulta empleados y planilla de Tooxs en lenguaje natural (GET)
+      parameters:
+        - name: message
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Mensaje o comando en lenguaje natural
+      responses:
+        "200":
+          description: Respuesta del agente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  response:
+                    type: string
+        "400":
+          description: Petición inválida (parámetro message faltante o vacío)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No autorizado — API key inválida o ausente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Error interno del servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
       security:
         - ApiKeyAuth: []

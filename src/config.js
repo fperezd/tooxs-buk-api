@@ -10,14 +10,6 @@ function optional(name) {
   return value.trim();
 }
 
-function required(name) {
-  const value = process.env[name];
-  if (!value || !value.trim()) {
-    throw new Error(`Falta la variable de entorno obligatoria: ${name}`);
-  }
-  return value.trim();
-}
-
 function numberWithDefault(name, fallback) {
   const raw = process.env[name];
   if (!raw) {

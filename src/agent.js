@@ -5,12 +5,29 @@ const ISO_DATETIME_RE =
   /^\d{4}-\d{2}-\d{2}[tT ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?([zZ]|[+-]\d{2}:?\d{2})?$/;
 const MONEY_KEY_RE =
   /(wage|salary|sueldo|monto|amount|price|precio|cost|costo|total|payment|pago|liquid|remuneracion|haber)/i;
-const PROTECTED_EMPLOYEE_RULES = [
-  {
-    id: "fernando-perez",
-    requiredNameTokens: ["fernando", "perez"]
+// Los empleados protegidos se configuran via variable de entorno PROTECTED_EMPLOYEES
+// Formato: JSON array de objetos con id y requiredNameTokens.
+// Ejemplo: [{"id":"fp","requiredNameTokens":["fernando","perez"]}]
+function loadProtectedEmployeeRules() {
+  const raw = process.env.PROTECTED_EMPLOYEES;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (rule) =>
+        rule &&
+        typeof rule.id === "string" &&
+        Array.isArray(rule.requiredNameTokens) &&
+        rule.requiredNameTokens.every((t) => typeof t === "string")
+    );
+  } catch {
+    console.warn("[config] PROTECTED_EMPLOYEES no es JSON válido, se ignora.");
+    return [];
   }
-];
+}
+
+const PROTECTED_EMPLOYEE_RULES = loadProtectedEmployeeRules();
 const REDACTED_TEXT = "restringido";
 const CONTRACTUAL_FIELDS_TO_REDACT = [
   "contract_type",
@@ -295,17 +312,32 @@ async function fetchUF() {
   }
 
   // mindicador.cl agrega datos oficiales del Banco Central de Chile
-  const response = await fetch("https://mindicador.cl/api/uf");
+  let response;
+  try {
+    response = await fetch("https://mindicador.cl/api/uf");
+  } catch (_networkError) {
+    throw new Error(
+      "No se pudo conectar al servicio de indicadores económicos. Intenta nuevamente más tarde.",
+      { cause: _networkError }
+    );
+  }
   if (!response.ok) {
-    throw new Error(`Error al consultar indicadores (${response.status})`);
+    throw new Error(
+      `El servicio de indicadores económicos no está disponible (${response.status}). Intenta más tarde.`
+    );
   }
 
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Respuesta inesperada del servicio de indicadores económicos.");
+  }
   const valor = data?.serie?.[0]?.valor;
   const fechaRaw = data?.serie?.[0]?.fecha;
 
   if (typeof valor !== "number" || !Number.isFinite(valor)) {
-    throw new Error("Respuesta de UF inesperada desde mindicador.cl");
+    throw new Error("No se pudo obtener el valor de la UF. Intenta nuevamente más tarde.");
   }
 
   const fechaDisplay = fechaRaw
@@ -349,6 +381,17 @@ function extractPathAndQuery(rawPath) {
   }
 
   return { path, query };
+}
+
+function isValidApiPath(path) {
+  if (!path || typeof path !== "string") return false;
+  // Must start with /
+  if (!path.startsWith("/")) return false;
+  // Block path traversal sequences
+  if (path.includes("..")) return false;
+  // Only allow safe URL path characters
+  if (!/^[\w/.\-~%@:!$&'()*+,;=?#[\]]+$/.test(path)) return false;
+  return true;
 }
 
 function extractRequestedPeriods(lower) {
@@ -498,10 +541,12 @@ export class BukConversationalAgent {
       return `Ping OK:\n${formatResult(result)}`;
     }
 
+    // Detección de conversión a UF: solo aplica a comandos conocidos que terminen con "en uf/ufs".
+    // Esto evita falsos positivos como "interesado en uf" o "experto en uf".
+    const UF_COMMAND_PREFIXES = ["empleado ", "buscar empleado ", "costo", "planilla"];
     const wantsUF =
-      lower.endsWith(" en uf") ||
-      lower.endsWith(" en ufs") ||
-      lower.includes(" en uf ");
+      (lower.endsWith(" en uf") || lower.endsWith(" en ufs")) &&
+      UF_COMMAND_PREFIXES.some((prefix) => lower.startsWith(prefix));
 
     if (["uf", "valor uf", "uf hoy", "uf del dia", "uf del día"].includes(lower)) {
       const uf = await fetchUF();
@@ -600,9 +645,31 @@ export class BukConversationalAgent {
       lower.includes("total planilla") ||
       lower.includes("total haberes");
 
-    const historicalPayrollIntent =
-      (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación")) &&
-      (extractRequestedPeriods(lower).length > 0 || /\b20\d{2}\b/.test(lower));
+    // La intención histórica requiere una acción explícita (costo/total/ver/mostrar/cuanto)
+    // combinada con "planilla" o "liquidacion" y un periodo. Esto evita dispararse
+    // con preguntas informativas como "¿qué es la planilla en 2024?"
+    const historicalPayrollActionWords = [
+      "costo",
+      "total",
+      "cuanto",
+      "cuánto",
+      "ver",
+      "mostrar",
+      "dame",
+      "muestra",
+      "consultar",
+      "consulta"
+    ];
+    const hasPayrollAction = historicalPayrollActionWords.some((word) => lower.includes(word));
+    const hasPayrollKeyword =
+      lower.includes("planilla") ||
+      lower.includes("liquidacion") ||
+      lower.includes("liquidación");
+    const hasPeriod =
+      extractRequestedPeriods(lower).length > 0 ||
+      Object.keys(MONTH_TO_NUMBER).some((month) => lower.includes(month));
+
+    const historicalPayrollIntent = hasPayrollAction && hasPayrollKeyword && hasPeriod;
 
     if (historicalPayrollIntent) {
       const periods = extractRequestedPeriods(lower);
@@ -767,6 +834,11 @@ export class BukConversationalAgent {
     if (lower.startsWith("get ")) {
       const rawPath = input.slice(4).trim();
       const { path, query } = extractPathAndQuery(rawPath);
+
+      if (!isValidApiPath(path)) {
+        return "Ruta no válida. Usa una ruta que comience con / y sin secuencias de traversal.";
+      }
+
       const result = await this.client.get(path, query);
 
       if (path.includes("/employees")) {
@@ -783,6 +855,11 @@ export class BukConversationalAgent {
       }
 
       const path = input.slice(5, firstSpaceAfterPath).trim();
+
+      if (!isValidApiPath(path)) {
+        return "Ruta no válida. Usa una ruta que comience con / y sin secuencias de traversal.";
+      }
+
       const rawBody = input.slice(firstSpaceAfterPath + 1).trim();
       const parsed = parseJsonSafely(rawBody);
       if (!parsed.ok) {

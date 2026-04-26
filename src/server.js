@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express from "express";
 import { BukConversationalAgent } from "./agent.js";
 import { config } from "./config.js";
@@ -20,7 +21,14 @@ function requireApiKey(req, res, next) {
     req.headers["x-api-key"] ||
     req.headers["authorization"]?.replace(/^Bearer\s+/i, "");
 
-  if (provided !== serverApiKey) {
+  // Comparación en tiempo constante para evitar timing attacks
+  const providedBuf = Buffer.from(provided ?? "", "utf8");
+  const expectedBuf = Buffer.from(serverApiKey, "utf8");
+  const valid =
+    providedBuf.length === expectedBuf.length &&
+    crypto.timingSafeEqual(providedBuf, expectedBuf);
+
+  if (!valid) {
     res.status(401).json({ error: "No autorizado." });
     return;
   }
@@ -85,14 +93,29 @@ app.get("/query", requireApiKey, async (req, res) => {
 
 // ── Iniciar servidor ──────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Servidor BUK API escuchando en puerto ${PORT} (modo: ${config.mode})`);
 
-  // Keep-alive: ping propio cada 10 minutos para evitar que Render lo duerma
-  const selfUrl = process.env.SELF_URL || `http://localhost:${PORT}`;
-  setInterval(() => {
-    fetch(`${selfUrl}/health`)
-      .then(() => console.log("[keep-alive] ping ok"))
-      .catch((e) => console.warn("[keep-alive] ping falló:", e.message));
-  }, 10 * 60 * 1000);
+  // Keep-alive: ping propio cada 10 minutos para evitar que Render lo duerma.
+  // Solo se activa si SELF_URL está explícitamente configurado (entorno de producción).
+  const selfUrl = process.env.SELF_URL;
+  if (selfUrl) {
+    setInterval(() => {
+      fetch(`${selfUrl}/health`)
+        .then(() => console.log("[keep-alive] ping ok"))
+        .catch((e) => console.warn("[keep-alive] ping falló:", e.message));
+    }, 10 * 60 * 1000);
+  }
 });
+
+// ── Graceful shutdown ────────────────────────────────────────────────────────
+function shutdown(signal) {
+  console.log(`${signal} recibido. Cerrando servidor...`);
+  server.close(() => {
+    console.log("Servidor cerrado.");
+    process.exit(0);
+  });
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
