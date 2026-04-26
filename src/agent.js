@@ -672,7 +672,7 @@ export class BukConversationalAgent {
     }
 
     if (payrollKeywords) {
-      const result = await this.client.get("/api/v1/employees");
+      const result = await this.client.get("/api/v1/employees", { status: "activo" });
       const employees = extractEmployees(result);
       const total = employees.reduce(
         (sum, employee) => sum + getPayrollAmount(employee),
@@ -683,19 +683,19 @@ export class BukConversationalAgent {
         const uf = await fetchUF();
         const totalUF = clpToUF(total, uf.value);
         return formatResult({
-          total_empleados_considerados: employees.length,
+          total_empleados_activos: employees.length,
           costo_total_planilla_clp: total,
           costo_total_planilla_uf: `UF ${formatUFAmount(totalUF)}`,
           valor_uf_usado: uf.value,
           fecha_uf: uf.fechaDisplay,
-          incluye_empleados_con_restriccion_contractual: true
+          filtro: "solo empleados activos"
         });
       }
 
       return formatResult({
-        total_empleados_considerados: employees.length,
+        total_empleados_activos: employees.length,
         costo_total_planilla: total,
-        incluye_empleados_con_restriccion_contractual: true
+        filtro: "solo empleados activos"
       });
     }
 
