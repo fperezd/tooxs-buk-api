@@ -600,9 +600,12 @@ export class BukConversationalAgent {
       lower.includes("total planilla") ||
       lower.includes("total haberes");
 
+    const hasPeriodHint = extractRequestedPeriods(lower).length > 0 || /\b20\d{2}\b/.test(lower);
+
     const historicalPayrollIntent =
-      (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación")) &&
-      (extractRequestedPeriods(lower).length > 0 || /\b20\d{2}\b/.test(lower));
+      (lower.includes("planilla") || lower.includes("liquidacion") || lower.includes("liquidación") ||
+       lower.includes("remuneracion") || lower.includes("remuneración") || lower.includes("haberes")) &&
+      hasPeriodHint;
 
     if (historicalPayrollIntent) {
       const periods = extractRequestedPeriods(lower);
